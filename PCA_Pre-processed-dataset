@@ -1,0 +1,139 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+import os
+import requests
+
+sns.set_context('notebook', font_scale=1.5, rc={'lines.markeredgewidth': 2})
+
+# Download dataset
+fname = "allen_visual_behavior_2p_change_detection_familiar_novel_image_sets.parquet"
+url = "https://ndownloader.figshare.com/files/28470255"
+
+if not os.path.isfile(fname):
+    try:
+        r = requests.get(url)
+        r.raise_for_status()
+        with open(fname, "wb") as fid:
+            fid.write(r.content)
+    except requests.RequestException as e:
+        print(f"Error downloading the dataset: {e}")
+
+# Load the dataset
+data = pd.read_parquet(fname)
+
+# Filter data for SST and VIP neurons
+sst_data = data[data.cre_line == 'Sst-IRES-Cre']
+vip_data = data[data.cre_line == 'Vip-IRES-Cre']
+
+# Further filter for omissions
+sst_omitted_data = sst_data[sst_data.omitted == True]
+vip_omitted_data = vip_data[vip_data.omitted == True]
+
+# Function to plot population average response
+def plot_population_average_omission(neuron_data, title):
+    timestamps = neuron_data.trace_timestamps.values[0]
+    for exposure_level in neuron_data.exposure_level.unique():
+        traces = np.stack(neuron_data[neuron_data.exposure_level == exposure_level].trace.values)
+        plt.plot(timestamps, np.mean(traces, axis=0), label=exposure_level)
+    plt.title(title)
+    plt.xlabel('Time after omission (sec)')
+    plt.ylabel('dF/F')
+    plt.legend()
+    plt.show()
+
+# Plot SST population average response for omissions in familiar and novel sessions
+plot_population_average_omission(sst_omitted_data, 'SST population average response to omissions')
+
+# Plot VIP population average response for omissions in familiar and novel sessions
+plot_population_average_omission(vip_omitted_data, 'VIP population average response to omissions')
+
+#-------------------------------------------------------------------------------
+
+# Extract the necessary features and labels from the dataset
+# Using 'trace' as the feature and 'image_name' as the label
+def prepare_data(data):
+    features = np.vstack(data['trace'].values)
+    labels = data['image_name'].values
+    return features, labels
+
+# Prepare the data for SST and VIP neurons during omitted stimuli
+sst_features, sst_labels = prepare_data(sst_omitted_data)
+vip_features, vip_labels = prepare_data(vip_omitted_data)
+
+# Combine SST and VIP data
+features = np.vstack((sst_features, vip_features))
+labels = np.hstack((sst_labels, vip_labels))
+cell_types = np.hstack((['SST']*len(sst_labels), ['VIP']*len(vip_labels)))
+
+# Standardize the data
+scaler = StandardScaler()
+features_scaled = scaler.fit_transform(features)
+
+# Split the data into training and test sets
+X_train, X_test, y_train, y_test, cell_train, cell_test = train_test_split(features_scaled, labels, cell_types, test_size=0.3, random_state=42)
+
+# Train a RandomForestClassifier
+clf = RandomForestClassifier(n_estimators=100, random_state=42)
+clf.fit(X_train, y_train)
+
+# Predict on the test set
+y_pred = clf.predict(X_test)
+
+# Evaluate the model
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Accuracy: {accuracy:.2f}")
+
+# Generate a confusion matrix and classification report
+conf_matrix = confusion_matrix(y_test, y_pred)
+class_report = classification_report(y_test, y_pred)
+print("Confusion Matrix:\n", conf_matrix)
+print("\nClassification Report:\n", class_report)
+
+#----------------------------------------------------------------------------------------
+
+# Perform PCA
+pca = PCA(n_components=2)
+principal_components = pca.fit_transform(features_scaled)
+
+# Plot the principal components
+plt.figure(figsize=(10, 6))
+plt.scatter(principal_components[:, 0], principal_components[:, 1], c=[1 if cell == 'VIP' else 0 for cell in cell_types], cmap='viridis', alpha=0.5)
+plt.title('PCA of Neural Responses to Omitted Stimuli')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.colorbar(label='Cell Type (0=SST, 1=VIP)')
+plt.show()
+
+#----------------------------------------------------------------------------------------
+
+# Analyze the response profiles
+response_profiles = pd.DataFrame({
+    'Principal Component 1': principal_components[:, 0],
+    'Principal Component 2': principal_components[:, 1],
+    'Cell Type': cell_types,
+    'Image Name': labels
+})
+
+# Group the response profiles by cell type and calculate the mean for each group
+grouped_profiles = response_profiles.groupby('Cell Type').mean(numeric_only=True)
+
+# Print the grouped profiles
+print(grouped_profiles)
+
+# Plot the mean response profiles
+plt.figure(figsize=(10, 6))
+for cell_type in response_profiles['Cell Type'].unique():
+    subset = response_profiles[response_profiles['Cell Type'] == cell_type]
+    plt.scatter(subset['Principal Component 1'], subset['Principal Component 2'], alpha=0.5, label=cell_type)
+plt.title('Mean Response Profiles by Cell Type')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.legend()
+plt.show()
